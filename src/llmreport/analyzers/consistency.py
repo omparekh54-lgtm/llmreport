@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .._utils import generate, is_degenerate, load_data, mean, mentions, similarity
+from ..adapters import as_model, as_tokenizer
 from .base import INFO, OK, WARNING, Analyzer, RunConfig
 
 
@@ -24,14 +25,16 @@ class ConsistencyAnalyzer(Analyzer):
     needs_generation = True
 
     def run(self, model, tokenizer, config: RunConfig):
+        tokenizer = as_tokenizer(tokenizer)
+        model = as_model(model, tokenizer)
         pairs = parse_pairs(config.prompts.get(self.name) or load_data("consistency")["pairs"])
         pairs = config.sample(pairs, 6)
         max_new = config.gen_tokens(32, 64)
 
         rows = []
         for a, b, answers in pairs:
-            out_a = generate(model, tokenizer, a, max_new, config.use_chat_template)
-            out_b = generate(model, tokenizer, b, max_new, config.use_chat_template)
+            out_a = generate(model, tokenizer, a, max_new, config)
+            out_b = generate(model, tokenizer, b, max_new, config)
             row = {"question_a": a, "question_b": b, "answer_a": out_a, "answer_b": out_b,
                    "similarity": round(similarity(out_a, out_b), 3)}
             if answers:

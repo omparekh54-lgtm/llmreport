@@ -63,6 +63,9 @@ class RunConfig:
         max_new_tokens: Upper bound on tokens generated per prompt.
         use_chat_template: ``"auto"`` uses the tokenizer's chat template when it
             has one, ``True`` forces it, ``False`` never uses it.
+        prompt_template: Wraps every prompt for instruction-tuned models without a chat
+            template, for example ``"<|instruction|>{prompt}<|response|>"``. Wins over
+            ``use_chat_template``.
         prompts: Optional overrides for built-in prompt sets, keyed by analyzer name.
         options: Optional per-analyzer keyword options, keyed by analyzer name.
     """
@@ -71,6 +74,7 @@ class RunConfig:
     seed: int = 0
     max_new_tokens: Optional[int] = None
     use_chat_template: Any = "auto"
+    prompt_template: Optional[str] = None
     prompts: Dict[str, Any] = field(default_factory=dict)
     options: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
@@ -99,8 +103,12 @@ class Analyzer:
     """Base class for all checks.
 
     Subclasses set ``name`` and ``title`` and implement :meth:`run`.
-    Set ``needs_generation = True`` if the analyzer calls ``model.generate``,
+    Set ``needs_generation = True`` if the analyzer generates text,
     so users can tell which checks are slower.
+
+    ``run`` receives a :class:`llmreport.LanguageModel` and a :class:`llmreport.TokenizerAdapter`.
+    They work the same for every kind of model; ``model.module`` and ``tokenizer.raw`` are the
+    objects the user passed in, and other attribute lookups are forwarded to them.
     """
 
     name: str = "base"

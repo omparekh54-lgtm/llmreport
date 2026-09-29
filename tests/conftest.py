@@ -26,16 +26,22 @@ def _corpus():
     return texts * 3
 
 
-def build_tokenizer(chat: bool = False):
+def build_raw_tokenizer(specials=("<|endoftext|>",), vocab_size: int = 400) -> Tokenizer:
+    """A byte-level BPE `tokenizers.Tokenizer` (the kind nanoGPT-style projects save as tokenizer.json)."""
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tok.decoder = decoders.ByteLevel()
     trainer = trainers.BpeTrainer(
-        vocab_size=400,
-        special_tokens=["<|endoftext|>"],
+        vocab_size=vocab_size,
+        special_tokens=list(specials),
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
     )
     tok.train_from_iterator(_corpus(), trainer)
+    return tok
+
+
+def build_tokenizer(chat: bool = False):
+    tok = build_raw_tokenizer()
     fast = PreTrainedTokenizerFast(
         tokenizer_object=tok,
         bos_token="<|endoftext|>",

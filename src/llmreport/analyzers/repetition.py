@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .._utils import distinct_n, generate, load_data, mean, repeated_ngram_rate, words
+from ..adapters import as_model, as_tokenizer
 from .base import OK, WARNING, Analyzer, RunConfig
 
 
@@ -13,13 +14,15 @@ class RepetitionAnalyzer(Analyzer):
     needs_generation = True
 
     def run(self, model, tokenizer, config: RunConfig):
+        tokenizer = as_tokenizer(tokenizer)
+        model = as_model(model, tokenizer)
         prompts = config.prompts.get(self.name) or load_data("repetition")["prompts"]
         prompts = config.sample(prompts, 5)
         max_new = config.gen_tokens(60, 120)
 
         rows = []
         for prompt in prompts:
-            text = generate(model, tokenizer, prompt, max_new, config.use_chat_template)
+            text = generate(model, tokenizer, prompt, max_new, config)
             toks = words(text)
             rows.append(
                 {
