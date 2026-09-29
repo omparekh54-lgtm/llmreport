@@ -49,3 +49,9 @@ markers = ["slow: tests that take a while (deselect with -m 'not slow')"]
 
 [tool.ruff]
 line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+# Pin the rule set so new ruff releases can't change what CI checks.
+# E4/E7/E9 = real errors, F = pyflakes (unused imports, undefined names), I = import order.
+select = ["E4", "E7", "E9", "F", "I"]

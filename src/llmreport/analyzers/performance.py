@@ -7,7 +7,7 @@ import statistics
 import psutil
 import torch
 
-from .._utils import human_bytes, pad_id, max_context, model_device, timer
+from .._utils import human_bytes, max_context, model_device, pad_id, timer
 from .base import OK, WARNING, Analyzer, RunConfig
 
 _FILLER = (
