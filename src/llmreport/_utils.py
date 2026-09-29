@@ -70,87 +70,92 @@ def timer(device: torch.device):
 
 
 def max_context(model, tokenizer=None, fallback: int = 2048) -> int:
-    cfg = getattr(model, "config", None)
-    for attr in ("max_position_embeddings", "n_positions", "max_sequence_length", "seq_length"):
-        value = getattr(cfg, attr, None)
-        if isinstance(value, int) and value > 0:
-            return value
-    tok_max = getattr(tokenizer, "model_max_length", None)
-    if isinstance(tok_max, int) and 0 < tok_max < 10**7:
-        return tok_max
-    return fallback
+    """The model's context window, or ``fallback`` when it can't be found (or is unlimited)."""
+    from .adapters import as_model
+
+    return as_model(model, tokenizer).usable_context(fallback)
 
 
 def pad_id(tokenizer) -> int:
     """Padding id for generate(), without modifying the user's tokenizer."""
-    for value in (tokenizer.pad_token_id, tokenizer.eos_token_id):
-        if value is not None:
-            return value if isinstance(value, int) else value[0]
-    return 0
+    from .adapters import as_tokenizer
+
+    return as_tokenizer(tokenizer).pad_id
 
 
 def has_chat_template(tokenizer) -> bool:
     return bool(getattr(tokenizer, "chat_template", None))
 
 
-def build_prompt(tokenizer, prompt: str, use_chat_template="auto") -> str:
-    """Wrap a user message in the tokenizer's chat template when appropriate."""
-    use = has_chat_template(tokenizer) if use_chat_template == "auto" else bool(use_chat_template)
-    if not use:
-        return prompt
-    messages = [{"role": "user", "content": prompt}]
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+def uses_instruction_format(tokenizer, config) -> bool:
+    """True if prompts are wrapped in a chat template or a custom prompt template."""
+    if getattr(config, "prompt_template", None):
+        return True
+    use = getattr(config, "use_chat_template", "auto")
+    return has_chat_template(tokenizer) if use == "auto" else bool(use)
+
+
+def build_prompt(tokenizer, prompt: str, config_or_flag="auto"):
+    """Format a user message for the model. Returns ``(text, add_special_tokens)``.
+
+    A custom ``prompt_template`` such as ``"<|instruction|>{prompt}<|response|>"`` wins,
+    then the tokenizer's chat template (when enabled), then the raw prompt.
+    """
+    template = getattr(config_or_flag, "prompt_template", None)
+    use_chat = getattr(config_or_flag, "use_chat_template", config_or_flag)
+    if template:
+        if "{prompt}" not in template:
+            raise ValueError("prompt_template must contain {prompt}, for example '<|user|>{prompt}<|assistant|>'")
+        return template.replace("{prompt}", prompt), False
+    use = has_chat_template(tokenizer) if use_chat == "auto" else bool(use_chat)
+    if use:
+        return tokenizer.apply_chat(prompt), False  # chat templates already contain <bos> etc.
+    return prompt, True
 
 
 @torch.no_grad()
-def generate(
-    model,
-    tokenizer,
-    prompt: str,
-    max_new_tokens: int = 40,
-    use_chat_template="auto",
-) -> str:
-    """Greedy-decode a completion and return only the newly generated text."""
-    device = model_device(model)
-    text = build_prompt(tokenizer, prompt, use_chat_template)
-    # Chat templates already contain special tokens such as <bos>.
-    add_special = text == prompt
-    enc = tokenizer(text, return_tensors="pt", add_special_tokens=add_special)
-    enc = {k: v.to(device) for k, v in enc.items()}
-    limit = max_context(model, tokenizer)
-    if enc["input_ids"].shape[1] + max_new_tokens > limit:
-        keep = max(1, limit - max_new_tokens)
-        enc = {k: v[:, -keep:] for k, v in enc.items()}
-    out = model.generate(
-        **enc,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        pad_token_id=pad_id(tokenizer),
-    )
-    new_tokens = out[0, enc["input_ids"].shape[1]:]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+def generate(model, tokenizer, prompt: str, max_new_tokens: int = 40, config_or_flag="auto") -> str:
+    """Greedy-decode a completion and return only the newly generated text.
+
+    Works with any model: Hugging Face models use their own ``generate()``, other models
+    use llmreport's built-in greedy loop over the model's logits.
+    """
+    from .adapters import as_model, as_tokenizer
+
+    tok = as_tokenizer(tokenizer)
+    lm = as_model(model, tok)
+    text, add_special = build_prompt(tok, prompt, config_or_flag)
+    ids = tok.encode(text, add_special=add_special)
+    new = lm.generate_ids(ids, max_new_tokens)
+    return tok.decode(new, skip_special=True).strip()
 
 
 @torch.no_grad()
 def perplexity(model, tokenizer, texts: Sequence[str], max_length: Optional[int] = None) -> Dict:
     """Token-weighted perplexity over a list of texts.
 
-    Returns a dict with ``perplexity``, ``mean_nll`` (natural log) and ``tokens``.
+    Returns a dict with ``perplexity``, ``mean_nll`` (natural log), ``bits_per_char`` and ``tokens``.
+    Texts longer than the context window are cut to fit.
     """
-    device = model_device(model)
-    limit = min(max_length or 10**9, max_context(model, tokenizer))
+    from .adapters import as_model, as_tokenizer
+
+    tok = as_tokenizer(tokenizer)
+    lm = as_model(model, tok)
+    device = lm.device
+    limit = min(max_length or 10**9, lm.usable_context())
     total_nll, total_tokens, total_chars = 0.0, 0, 0
     per_text = []
     for text in texts:
-        ids = tokenizer(text, return_tensors="pt")["input_ids"][:, :limit].to(device)
-        if ids.shape[1] < 2:
+        ids = tok.encode(text, add_special=True)[:limit]
+        if len(ids) < 2:
             continue
-        out = model(input_ids=ids, labels=ids)
-        n = ids.shape[1] - 1  # number of predicted tokens
-        total_nll += float(out.loss) * n
+        nll, n = lm.token_nll(torch.tensor([ids], device=device), start=1)
+        if n == 0:
+            continue
+        total_nll += nll
         total_tokens += n
-        total_chars += len(tokenizer.decode(ids[0, 1:], skip_special_tokens=True))
-        per_text.append(math.exp(float(out.loss)))
+        total_chars += len(tok.decode(ids[1:], skip_special=True))
+        per_text.append(math.exp(nll / n))
     if total_tokens == 0:
         nan = float("nan")
         return {"perplexity": nan, "mean_nll": nan, "bits_per_char": nan, "tokens": 0, "per_text": []}

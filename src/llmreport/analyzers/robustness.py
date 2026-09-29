@@ -12,28 +12,25 @@ from .._utils import (
     generate,
     is_degenerate,
     load_data,
-    max_context,
     mean,
     mentions,
-    model_device,
     similarity,
 )
+from ..adapters import as_model, as_tokenizer
 from .base import INFO, OK, WARNING, Analyzer, RunConfig
 from .perplexity import perplexity_texts
 
 
 @torch.no_grad()
-def _target_nll(model, tokenizer, context: str, target: str) -> float:
+def _target_nll(lm, tok, context: str, target: str) -> float:
     """Mean negative log-likelihood of ``target`` given ``context``."""
-    device = model_device(model)
-    ctx = tokenizer(context, return_tensors="pt")["input_ids"]
-    tgt = tokenizer(" " + target, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    ids = torch.cat([ctx, tgt], dim=1)[:, : max_context(model, tokenizer)].to(device)
-    labels = ids.clone()
-    labels[:, : ctx.shape[1]] = -100  # only score the (clean) target
-    if (labels != -100).sum() == 0:
+    ctx = tok.encode(context, add_special=True) if context else []
+    tgt = tok.encode(" " + target)
+    ids = (ctx + tgt)[: lm.usable_context()]
+    if len(ids) < 2 or len(ctx) >= len(ids):
         return float("nan")
-    return float(model(input_ids=ids, labels=labels).loss)
+    nll, n = lm.token_nll(torch.tensor([ids], device=lm.device), start=max(1, len(ctx)))
+    return nll / n if n else float("nan")
 
 
 def _split(text: str):
@@ -49,6 +46,8 @@ class RobustnessAnalyzer(Analyzer):
     needs_generation = True
 
     def run(self, model, tokenizer, config: RunConfig):
+        tokenizer = as_tokenizer(tokenizer)
+        model = as_model(model, tokenizer)
         rate = config.option(self.name, "typo_rate", 0.15)
         rng = random.Random(config.seed)
 
@@ -86,8 +85,8 @@ class RobustnessAnalyzer(Analyzer):
         gen_rows = []
         for q, answers in items:
             noisy_q = add_typos(q, max(rate, 0.3), rng)
-            a = generate(model, tokenizer, q, max_new, config.use_chat_template)
-            b = generate(model, tokenizer, noisy_q, max_new, config.use_chat_template)
+            a = generate(model, tokenizer, q, max_new, config)
+            b = generate(model, tokenizer, noisy_q, max_new, config)
             row = {"question": q, "noisy_question": noisy_q, "answer": a, "noisy_answer": b,
                    "similarity": round(similarity(a, b), 3)}
             if answers:

@@ -1,6 +1,6 @@
 # llmreport
 
-**A one-line behavior and performance report for your language model.**
+**A one-line behavior and performance report for any language model.**
 
 You trained or fine-tuned an LLM. Now what is it actually like? `llmreport` runs a set of quick checks and gives you one readable report, right in your notebook:
 
@@ -11,15 +11,18 @@ report = llmreport.analyze(model, tokenizer)   # or: llmreport.analyze("gpt2")
 report                                          # renders as a report in Jupyter / Colab
 ```
 
+It works with **any PyTorch language model**: Hugging Face models, and models you wrote yourself (nanoGPT-style GPTs, Llama-style models with RoPE and grouped-query attention, recurrent LSTMs, state-space models, TorchScript files, INT8-quantized checkpoints). The only requirement is that calling the model on token ids returns next-token scores.
+
 | Check | What it tells you |
 |---|---|
-| **Architecture** | Parameters (and where they are), layers, heads, context window, dtype, memory at FP32/FP16/INT8/INT4, KV-cache size, tokenizer facts |
+| **Architecture** | Read from the model's actual modules: family (transformer, recurrent, state-space, mixture of experts), layers, hidden size, attention heads and KV heads (MHA / GQA / MQA), feed-forward size and type (standard, gated/SwiGLU, experts), position encoding (learned, RoPE, ALiBi), norm type and pre/post placement, activation, weight tying, parameters and where they are, memory at FP32/FP16/INT8/INT4, KV-cache size, tokenizer facts |
 | **Performance** | Time to first token and tokens/second at several prompt lengths, GPU and process memory |
 | **Perplexity** | How well it predicts everyday English, plus tokenizer-independent bits per character |
 | **Repetition** | Whether it gets stuck in loops (repeated 3-grams, distinct-1/2) |
 | **Consistency** | Whether simple factual questions get the same (correct) answer when reworded |
 | **Typo robustness** | How much of the benefit of context typos destroy, and whether misspelled questions are still answered correctly |
 | **Refusals** | Whether it declines harmful requests, and whether it over-refuses harmless-but-edgy ones |
+| **Python code** | Writes small Python functions and runs them against unit tests (pass@1), plus how often the output is valid Python |
 
 Every check gives a status (OK / Check / Info), a plain-English summary, the numbers, notes on caveats, and the actual sample outputs so you can judge for yourself.
 
@@ -37,7 +40,7 @@ pip install git+https://github.com/omparekh54-lgtm/llmreport.git
 
 In Jupyter or Colab, put `!` in front: `!pip install llmreport`.
 
-Requires Python 3.9+, PyTorch and `transformers`. Add `pip install "llmreport[rich]"` for nicer terminal tables.
+Requires Python 3.9+, PyTorch and `transformers`. Add `pip install "llmreport[rich]"` for nicer terminal tables. SentencePiece and tiktoken tokenizers work if those packages are installed.
 
 ## Usage
 
@@ -54,9 +57,43 @@ llmreport.analyze(model, tokenizer)             # model and tokenizer objects
 llmreport.analyze(model)                        # tokenizer found automatically from the model's name/folder
 llmreport.analyze(pipe)                         # a transformers text-generation pipeline
 llmreport.analyze(llmreport.load("gpt2"))       # a (model, tokenizer) pair
+llmreport.analyze(my_model, "tokenizer.json")   # your own nn.Module + a tokenizer file
+llmreport.analyze("final.pt", "tokenizer.json", model_class=GPT)   # a checkpoint file
 
 from llmreport import analyze                   # or import just the function
 report = analyze("gpt2", checks="perplexity")   # one check, a "a,b" string, or a list
+```
+
+### Your own model (written from scratch)
+
+Pass your model and its tokenizer. llmreport works out how to call the model and where the logits are, reads the architecture from the modules, and generates text with its own greedy loop if the model has no Hugging Face-style `generate()`:
+
+```python
+from gpt_model import GPT            # your model class
+import llmreport
+
+model, tokenizer = llmreport.load_checkpoint(
+    "checkpoints/final.pt", GPT,     # {"model": state_dict, "config": cfg} or a whole saved model
+    tokenizer="tokenizer.json",
+)
+report = llmreport.analyze(
+    model, tokenizer,
+    prompt_template="<|instruction|>{prompt}<|response|>",   # how your instruction-tuned model expects prompts
+)
+report.to_html("my_model.html")
+```
+
+What it handles automatically:
+
+- **Calling the model**: `model(ids)`, `model(input_ids=ids)`, outputs that are a tensor, a `(logits, loss)` tuple, a dict, or an object with `.logits`; `(seq, batch, vocab)` layouts; nanoGPT-style models that only return the last position unless given targets.
+- **Tokenizers**: Hugging Face tokenizers, `tokenizers.Tokenizer` objects or `tokenizer.json` files, SentencePiece (`.model`), tiktoken, or any object with `encode` and `decode`. End-of-text tokens such as `<|endoftext|>`, `</s>` or `<|eot_id|>` are found and used to stop generation.
+- **Checkpoints** (`load_checkpoint`): whole saved models, state dicts with or without a stored config (dataclass, dict, argparse namespace), `torch.compile` / DataParallel prefixes, Lightning-style `state_dict` keys, TorchScript files, `.safetensors`, and dynamically quantized INT8 weights. Only load checkpoints you trust: files that store Python objects are read with pickle.
+- **Context window**: from the config (`block_size`, `max_seq_len`, `max_position_embeddings`, ...) or the size of the position embedding. Set `context_length=` if it can't be found.
+
+If your model needs a special call, give llmreport a function from token ids to logits:
+
+```python
+llmreport.analyze(model, tokenizer, forward=lambda ids: model(ids, start_pos=0))
 ```
 
 ### In a notebook
@@ -128,8 +165,12 @@ Each metric is marked **better** or **worse** where the direction is known.
 ```bash
 llmreport gpt2 --html gpt2.html --markdown MODEL_CARD.md
 llmreport my-org/my-model --checks architecture,performance --device cuda
+llmreport checkpoints/final.pt --model-class gpt_model:GPT --tokenizer tokenizer.json \
+          --template "<|instruction|>{prompt}<|response|>" --html report.html
 llmreport --list-checks
 ```
+
+`--model-class` takes `module:Class` (run it from the folder that contains the module) or `path/to/file.py:Class`.
 
 ## Write your own check
 
@@ -143,9 +184,11 @@ class AnswerLength(llmreport.Analyzer):
     description = "Average length of answers in words."
 
     def run(self, model, tokenizer, config):
+        # model and tokenizer work the same for every kind of model:
+        # model.logits(ids), model.generate_ids(ids, n), tokenizer.encode(text), tokenizer.decode(ids)
         from llmreport._utils import generate
         prompts = ["What is AI?", "Describe a cat."]
-        lengths = [len(generate(model, tokenizer, p, 64).split()) for p in prompts]
+        lengths = [len(generate(model, tokenizer, p, 64, config).split()) for p in prompts]
         avg = sum(lengths) / len(lengths)
         return self.result(f"Answers average {avg:.0f} words.", metrics={"avg_words": avg})
 
@@ -162,6 +205,9 @@ If one check crashes, the others still run and the error shows up in the report.
 - Refusal detection matches phrases like "I can't help" or "I'm sorry, but" near the start of the answer. Base models (no chat template) usually refuse nothing, and the report says so.
 - Perplexity depends on the tokenizer. Compare bits per character across models with different tokenizers.
 - Behavior checks use greedy decoding, which repeats more than typical sampling settings.
+- For models without a Hugging Face `generate()`, llmreport generates with its own loop that re-runs the whole sequence for each new token (no KV cache). Results are exact; speeds are what a model without a cache achieves.
+- The **Python code** check runs the model's code in a separate Python process with a time limit. Turn that off with `options={"code": {"execute": False}}` to only check syntax. Instruction-tuned models (chat template or `prompt_template`) get a request; base models continue a function signature and docstring.
+- Checks written for English (perplexity, consistency, typo robustness, refusals) will score a code-only model badly. That reflects what it was trained on, not a bug.
 - `compare()` ignores tiny differences (under 1 percentage point, or under 10% for timings) so run-to-run noise isn't labelled better or worse.
 - Results are reproducible with the same `seed`, model, and hardware.
 
@@ -173,6 +219,10 @@ The test suite checks the numbers against cases where the right answer is known 
 - **KV-cache size** matches the known 512 KiB per token for Llama-2-7B in FP16, and 128 KiB for Mistral-7B with grouped-query attention.
 - **Perplexity** equals the vocabulary size exactly for a model that treats every token as equally likely, and matches an independent hand calculation.
 - **Speed**: a model slowed to 20 ms per step is measured at about 50 tokens per second.
+- **Models written from scratch**: a nanoGPT-style GPT (the PyCoder model this library was first built for) reports exactly its published 142,627,840 parameters; Llama-style (RoPE, RMSNorm, grouped-query attention, SwiGLU), LSTM, sequence-first `nn.Transformer`, TorchScript and INT8-quantized models are each checked for the right structure and for perplexity equal to a hand calculation from their logits.
+- **Same weights, two implementations**: a from-scratch GPT and the same weights loaded into Hugging Face GPT-2 give the same perplexity, the same architecture numbers and token-for-token the same generated text.
+- **Hugging Face architectures** (Llama, Qwen2, GPT-NeoX, Gemma, Mixtral, Mamba) get the right attention type, feed-forward type and activation.
+- **Tokenizers**: Hugging Face, `tokenizers`, tokenizer.json, SentencePiece, tiktoken and a hand-written character tokenizer all give perplexity equal to the vocabulary size on a uniform model.
 - **Behavior checks** are run on scripted models whose answers we write ourselves (always correct, correct in only one phrasing, looping, refusing everything, never refusing, typo-tolerant, typo-brittle), and each must reach the expected verdict.
 
 ## Development
@@ -192,6 +242,7 @@ ruff check src tests
 - Optional wrappers for `lm-evaluation-harness` and `garak`
 - Charts for speed vs prompt length
 - Support for API-based models
+- KV-cache-aware generation for custom models
 
 Contributions are welcome, and new checks are a great first PR.
 

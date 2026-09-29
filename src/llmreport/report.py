@@ -37,6 +37,9 @@ METRIC_DIRECTION = {
     "typo_accuracy": 1,
     "typo_answer_stability": 1,
     "harmful_refusal_rate": 1,
+    "pass_rate": 1,
+    "syntax_valid_rate": 1,
+    "defines_function_rate": 1,
 }
 
 
@@ -51,9 +54,9 @@ def format_value(key: str, value: Any) -> str:
     if isinstance(value, float) and math.isnan(value):
         return "n/a"
     if isinstance(value, (int, float)):
-        if key.endswith("_bytes"):
+        if key.endswith("_bytes") or "_bytes_" in key:
             return human_bytes(value)
-        if key.endswith("params") or key in ("tokens_scored",):
+        if key.endswith("params") or key.startswith("params_") or key in ("tokens_scored",):
             return human_number(value)
         if key.endswith("_rate") or key in (
             "accuracy", "correct_answer_agreement", "answer_overlap", "unrelated_baseline",
@@ -334,9 +337,10 @@ class Report:
         m = self.metadata
         out = []
         if model_card:
+            library = "transformers" if m.get("transformers_model", True) else "pytorch"
             out += [
                 "---",
-                "library_name: transformers",
+                f"library_name: {library}",
                 "tags:",
                 "- llmreport",
                 "---",

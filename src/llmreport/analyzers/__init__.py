@@ -6,6 +6,7 @@ from typing import Dict, List, Type
 
 from .architecture import ArchitectureAnalyzer
 from .base import Analyzer, AnalyzerResult, RunConfig
+from .code import CodeAnalyzer
 from .consistency import ConsistencyAnalyzer
 from .performance import PerformanceAnalyzer
 from .perplexity import PerplexityAnalyzer
@@ -24,6 +25,7 @@ DEFAULT_CHECKS: List[str] = [
     "consistency",
     "robustness",
     "refusal",
+    "code",
 ]
 
 
@@ -55,6 +57,7 @@ for _cls in (
     ConsistencyAnalyzer,
     RobustnessAnalyzer,
     RefusalAnalyzer,
+    CodeAnalyzer,
 ):
     register_analyzer(_cls)
 
