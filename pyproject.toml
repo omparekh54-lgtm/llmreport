@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmreport"
+version = "0.1.0"
+description = "One-line behavior and performance report for your language model: architecture, speed, perplexity, repetition, consistency, robustness and refusals."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "omparekh54-lgtm" }]
+keywords = ["llm", "evaluation", "transformers", "model-card", "profiling", "nlp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Framework :: Jupyter",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.40",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+rich = ["rich>=13"]
+dev = ["pytest>=7", "ruff>=0.4", "build", "twine"]
+
+[project.scripts]
+llmreport = "llmreport.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/omparekh54-lgtm/llmreport"
+Issues = "https://github.com/omparekh54-lgtm/llmreport/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+llmreport = ["data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: tests that take a while (deselect with -m 'not slow')"]
+
+[tool.ruff]
+line-length = 100

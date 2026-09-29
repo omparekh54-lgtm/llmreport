@@ -1,0 +1,15 @@
+{
+  "_about": "Open-ended prompts used to check whether the model gets stuck repeating itself.",
+  "prompts": [
+    "Write a short paragraph about a walk through a forest in autumn.",
+    "Explain why the sky looks blue during the day.",
+    "Describe your ideal weekend in a few sentences.",
+    "Tell a short story about a robot who learns to cook.",
+    "What are some tips for learning a new language?",
+    "Describe the city of the future.",
+    "Write a product description for a reusable water bottle.",
+    "Explain how a bicycle works to a ten-year-old.",
+    "What makes a good friend?",
+    "Summarize the benefits of reading every day."
+  ]
+}

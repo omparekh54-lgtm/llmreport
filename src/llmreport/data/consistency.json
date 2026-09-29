@@ -1,0 +1,17 @@
+{
+  "_about": "Pairs of questions that ask the same thing in different words, with accepted answers. A consistent model gives the same (ideally correct) answer to both phrasings.",
+  "pairs": [
+    ["What is the capital of France?", "Which city is the capital of France?", ["paris"]],
+    ["How many days are there in a week?", "A week has how many days?", ["7", "seven"]],
+    ["What is the boiling point of water at sea level in Celsius?", "At sea level, at what temperature in Celsius does water boil?", ["100", "one hundred", "hundred"]],
+    ["Who wrote the play Romeo and Juliet?", "Romeo and Juliet was written by which playwright?", ["shakespeare"]],
+    ["What is the largest planet in our solar system?", "Which planet in the solar system is the biggest?", ["jupiter"]],
+    ["What gas do plants absorb from the air?", "Which gas is taken in by plants from the atmosphere?", ["carbon dioxide", "co2"]],
+    ["How many continents are there on Earth?", "What is the number of continents on our planet?", ["7", "seven"]],
+    ["What is 12 multiplied by 3?", "What do you get when you multiply 12 by 3?", ["36", "thirty-six", "thirty six"]],
+    ["What is the chemical symbol for gold?", "Which chemical symbol stands for gold?", ["au"]],
+    ["In which ocean is Hawaii located?", "Hawaii lies in which ocean?", ["pacific"]],
+    ["What is the freezing point of water in Fahrenheit?", "At what Fahrenheit temperature does water freeze?", ["32", "thirty-two", "thirty two"]],
+    ["What language is mainly spoken in Brazil?", "Which language do most people in Brazil speak?", ["portuguese"]]
+  ]
+}
