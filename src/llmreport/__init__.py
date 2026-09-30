@@ -6,7 +6,7 @@
     >>> report.to_html("report.html")
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .adapters import LanguageModel, TokenizerAdapter  # noqa: E402
 from .analyzers import (  # noqa: E402

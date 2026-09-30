@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmreport"
-version = "0.3.0"
+version = "0.3.1"
 description = "Reports, quick functions and live training tracking for any PyTorch language model: architecture, health, speed, perplexity, behavior, code, and a live training dashboard with alerts."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -146,6 +146,19 @@ def test_health_catches_broken_weights(tok):
     assert "blocks.0.attn.qkv_proj.weight (30/192 rows)" in problems
 
 
+def test_health_and_info_on_int8_quantized_model(tok):
+    """Like PyCoder's export/model_int8.pt: quantized weights must be checked, not crash."""
+    m = tiny_gpt(tok.get_vocab_size()).eval()
+    q = torch.ao.quantization.quantize_dynamic(m, {nn.Linear}, dtype=torch.qint8)
+    h = lr.health(q)
+    assert h.ok and h.totals["tensors"] > 0
+    assert "qint8" in lr.info(q, tok).dtype or lr.info(q, tok).health_status == "ok"
+    with torch.no_grad():
+        q.blocks[0].mlp.fc_out.set_weight_bias(torch.quantize_per_tensor(
+            torch.zeros(64, 256), 0.1, 0, torch.qint8), None)
+    assert any("entirely zero" in i.problem for i in lr.health(q).issues)
+
+
 def test_health_checks_gradients(tok):
     m = tiny_gpt(tok.get_vocab_size())
     m.extra = nn.Linear(4, 4)  # never used in forward: gets no gradient

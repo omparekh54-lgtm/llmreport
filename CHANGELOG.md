@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-09-30
+
+### Fixed
+- `health()`, `info()` and `llmreport health` crashed on dynamically quantized INT8 models (such as an exported
+  `model_int8.pt`). Quantized weights are now checked like any others.
+
 ## [0.3.0] - 2026-09-30
 
 ### Added
