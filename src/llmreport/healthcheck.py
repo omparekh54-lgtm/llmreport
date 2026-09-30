@@ -184,7 +184,8 @@ def health(model, *, extreme: float = 1e3, dead_row_frac: float = 0.05) -> Healt
         if t.dtype in (torch.float16,) and st["abs_max"] > 6e4:
             fp16_overflow.append(name)
         if is_matrix and st["abs_max"] > 0:
-            rows = t.detach().float().reshape(t.shape[0], -1)
+            dense = t.detach().dequantize() if t.is_quantized else t.detach()
+            rows = dense.float().reshape(t.shape[0], -1)
             zero_rows = (rows.abs().amax(dim=1) == 0)
             pad = getattr(owner, "padding_idx", None)
             if isinstance(owner, nn.Embedding) and pad is not None and 0 <= pad < zero_rows.numel():

@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-09-30
+
+### Fixed
+- `health()`, `info()` and `llmreport health` crashed on dynamically quantized INT8 models (such as an exported
+  `model_int8.pt`). Quantized weights are now checked like any others.
+- Quantized left-to-right models (such as an INT8 GPT) were labelled "encoder-only (bidirectional)". The
+  left-to-right test now runs on temporary float copies of quantized layers, whose activation scaling
+  otherwise adds noise to every position.
+- The typo-robustness summary no longer says typos "cancel -5%" of the context benefit; it says typos
+  don't reduce it.
+
+### Added
+- `python -m llmreport ...` runs the command-line tool, for when the `llmreport` command is not on PATH
+  (common with `pip install --user` on Windows).
+
 ## [0.3.0] - 2026-09-30
 
 ### Added
