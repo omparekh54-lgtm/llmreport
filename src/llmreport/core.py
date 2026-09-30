@@ -14,15 +14,28 @@ import torch
 
 from . import __version__
 from ._utils import set_seed
-from .adapters import LanguageModel, TokenizerAdapter
+from .adapters import LanguageModel, NotSupportedByModel, TokenizerAdapter
 from .analyzers import DEFAULT_CHECKS, REGISTRY
-from .analyzers.base import ERROR, AnalyzerResult, RunConfig
+from .analyzers.base import ERROR, SKIPPED, AnalyzerResult, RunConfig
 from .loading import CHECKPOINT_SUFFIXES, load, load_checkpoint, pick_device
 from .report import Report
 
 
 def _pick_device(device: Optional[str]) -> str:
     return pick_device(device)
+
+
+def _skip_reason(analyzer, lm) -> Optional[AnalyzerResult]:
+    """A 'skipped' result when the check can't apply to this kind of model, otherwise None."""
+    if getattr(analyzer, "handles_any_model", False):
+        return None
+    if analyzer.needs_generation and not lm.can_generate:
+        why = f"{lm.name} is a {lm.kind_label}; it doesn't generate text, so this check doesn't apply."
+    elif analyzer.name == "perplexity" and not lm.can_score:
+        why = f"{lm.name} is a {lm.kind_label}, so it can't score text."
+    else:
+        return None
+    return AnalyzerResult(name=analyzer.name, title=analyzer.title, summary=why, status=SKIPPED)
 
 
 def _as_list(value) -> List[str]:
@@ -206,7 +219,9 @@ def analyze(
             set_seed(seed)
             t0 = time.perf_counter()
             try:
-                result = analyzer.run(lm, tok, config)
+                result = _skip_reason(analyzer, lm) or analyzer.run(lm, tok, config)
+            except NotSupportedByModel as exc:
+                result = AnalyzerResult(name=analyzer.name, title=analyzer.title, summary=str(exc), status=SKIPPED)
             except Exception as exc:  # keep going; one broken check should not sink the report
                 if raise_errors:
                     raise
@@ -242,6 +257,7 @@ def analyze(
         "device": str(lm.device),
         "model_class": type(lm.module).__name__,
         "transformers_model": lm.is_hf,
+        "model_kind": lm.kind,
         "tokenizer_class": tok.name,
         "generation": "model.generate" if lm.uses_model_generate else "llmreport greedy loop",
         "llmreport_version": __version__,

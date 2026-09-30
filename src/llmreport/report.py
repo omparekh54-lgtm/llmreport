@@ -54,6 +54,8 @@ def format_value(key: str, value: Any) -> str:
     if isinstance(value, float) and math.isnan(value):
         return "n/a"
     if isinstance(value, (int, float)):
+        if key in ("learning_rate", "lr"):
+            return f"{value:.3g}"
         if key.endswith("_bytes") or "_bytes_" in key:
             return human_bytes(value)
         if key.endswith("params") or key.startswith("params_") or key in ("tokens_scored",):

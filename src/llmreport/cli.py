@@ -2,6 +2,11 @@
 
     llmreport gpt2 --html report.html
     llmreport checkpoints/final.pt --model-class gpt_model:GPT --tokenizer tokenizer.json
+    llmreport info checkpoints/final.pt --model-class gpt_model:GPT --tokenizer tokenizer.json
+    llmreport health checkpoints/final.pt --model-class gpt_model:GPT
+    llmreport watch runs/pretrain                 # follow a training run live
+    llmreport dashboard runs/pretrain
+    llmreport progress checkpoints/pretrain --model-class gpt_model:GPT --tokenizer tokenizer.json
 """
 
 from __future__ import annotations
@@ -38,10 +43,147 @@ def load_class(spec: str):
         raise SystemExit(f"{target} has no class named {name!r}") from None
 
 
+_SUBCOMMANDS = ("watch", "dashboard", "info", "health", "progress")
+
+
+def _model_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("model", help="Hugging Face name, local folder, or checkpoint file")
+    p.add_argument("--tokenizer", help="Tokenizer: tokenizer.json, SentencePiece .model, folder or Hub name")
+    p.add_argument("--model-class", help="Class to rebuild a weights-only checkpoint, e.g. gpt_model:GPT")
+    p.add_argument("--device", default="auto")
+
+
+def _load_model(args):
+    from .loading import CHECKPOINT_SUFFIXES, load, load_checkpoint
+
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())
+    cls = load_class(args.model_class) if args.model_class else None
+    if os.path.isfile(args.model) and (cls is not None or args.model.endswith(CHECKPOINT_SUFFIXES)):
+        return load_checkpoint(args.model, cls, tokenizer=args.tokenizer, device=args.device)
+    model, tok = load(args.model, args.device)
+    return model, args.tokenizer or tok
+
+
+def _watch(log_dir: str, interval: float, once: bool) -> int:
+    """Follow a run from another terminal: progress lines, evaluations and alerts as they happen."""
+    import time
+
+    from .tracking import Run, _fmt_duration
+
+    seen_rows, seen_events, last_print = 0, 0, 0.0
+    print(f"Watching {log_dir} (Ctrl+C to stop)")
+    try:
+        while True:
+            try:
+                run = Run(log_dir)
+            except FileNotFoundError:
+                if once:
+                    print("No run found yet.")
+                    return 1
+                time.sleep(interval)
+                continue
+            for e in run.events[seen_events:]:
+                kind = e.get("kind")
+                if kind == "alert":
+                    print(f"[{e.get('severity', 'info')}] step {e.get('step', 0):,}: {e.get('message', '')}")
+                elif kind == "eval":
+                    vals = ", ".join(f"{k} {v:.4g}" for k, v in e.items()
+                                     if isinstance(v, (int, float)) and k not in ("step", "time", "eval_seconds"))
+                    print(f"[eval] step {e.get('step', 0):,}: {vals}")
+                elif kind in ("start", "resume", "end"):
+                    print(f"[{kind}] {e.get('message', '')}")
+            seen_events = len(run.events)
+            if len(run.rows) > seen_rows and (time.time() - last_print >= interval or once):
+                r = run.rows[-1]
+                s = run.summary()
+                parts = [f"step {r['step']:,}" + (f"/{s['total_steps']:,}" if s.get("total_steps") else "")]
+                if r.get("loss") is not None:
+                    parts.append(f"loss {r['loss']:.4f}" + (f" (avg {r['loss_avg']:.4f})" if r.get("loss_avg") else ""))
+                if r.get("lr") is not None:
+                    parts.append(f"lr {r['lr']:.2e}")
+                if r.get("grad_norm") is not None:
+                    parts.append(f"grad {r['grad_norm']:.3g}")
+                if s.get("tokens_per_s"):
+                    parts.append(f"{s['tokens_per_s']:,.0f} tok/s")
+                if s.get("elapsed_s"):
+                    parts.append(f"elapsed {_fmt_duration(s['elapsed_s'])}")
+                print(" | ".join(parts), flush=True)
+                seen_rows, last_print = len(run.rows), time.time()
+            if once or any(e.get("kind") == "end" for e in run.events[-2:]):
+                return 0
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
+
+
+def _subcommand(argv) -> int:
+    parser = argparse.ArgumentParser(prog="llmreport")
+    sub = parser.add_subparsers(dest="command", required=True)
+    w = sub.add_parser("watch", help="Follow a training run live from another terminal")
+    w.add_argument("log_dir")
+    w.add_argument("--interval", type=float, default=5.0)
+    w.add_argument("--once", action="store_true", help="Print the current state and exit")
+    d = sub.add_parser("dashboard", help="Write the HTML dashboard for a run")
+    d.add_argument("log_dir")
+    d.add_argument("--out", help="Where to write it (default: <log_dir>/dashboard.html)")
+    i = sub.add_parser("info", help="Everything about a model: structure, size, memory, health")
+    _model_args(i)
+    h = sub.add_parser("health", help="Check a model's weights for NaNs, dead layers and other problems")
+    _model_args(h)
+    pr = sub.add_parser("progress", help="Evaluate a folder of training checkpoints and chart the progress")
+    pr.add_argument("folder")
+    pr.add_argument("--tokenizer", required=True)
+    pr.add_argument("--model-class")
+    pr.add_argument("--texts", help="Text file with validation text (blank lines separate samples)")
+    pr.add_argument("--prompts", default="", help="Comma-separated prompts to generate from at each checkpoint")
+    pr.add_argument("--template")
+    pr.add_argument("--code", action="store_true", help="Also run the Python code check")
+    pr.add_argument("--device", default="auto")
+    args = parser.parse_args(argv)
+
+    if args.command == "watch":
+        return _watch(args.log_dir, args.interval, args.once)
+    if args.command == "dashboard":
+        from .tracking import load_run
+
+        path = load_run(args.log_dir).write_dashboard(args.out)
+        print(f"Wrote {path}")
+        return 0
+    if args.command in ("info", "health"):
+        from .functions import info
+        from .healthcheck import health
+
+        model, tok = _load_model(args)
+        result = info(model, tok) if args.command == "info" else health(model)
+        print(result)
+        return 0 if args.command == "info" or result.status != "critical" else 1
+    if args.command == "progress":
+        from .tracking import track_checkpoints
+
+        if os.getcwd() not in sys.path:
+            sys.path.insert(0, os.getcwd())
+        texts = None
+        if args.texts:
+            with open(args.texts, encoding="utf-8") as f:
+                texts = [t.strip() for t in f.read().split("\n\n") if t.strip()]
+        run = track_checkpoints(args.folder, load_class(args.model_class) if args.model_class else None,
+                                args.tokenizer, texts=texts, code=args.code, prompt_template=args.template,
+                                sample_prompts=[p for p in args.prompts.split(",") if p.strip()] or None,
+                                device=args.device)
+        print(f"Wrote {os.path.join(run.log_dir, 'dashboard.html')}")
+        return 0
+    return 2
+
+
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in _SUBCOMMANDS:
+        return _subcommand(argv)
     parser = argparse.ArgumentParser(
         prog="llmreport",
-        description="Run behavior and performance checks on any PyTorch language model.",
+        description="Run behavior and performance checks on any PyTorch language model. "
+                    "Other commands: watch, dashboard, info, health, progress (see llmreport <command> -h).",
     )
     parser.add_argument("model", nargs="?",
                         help="Hugging Face name, local folder, or checkpoint file (.pt/.pth/.bin/.ckpt/.safetensors)")

@@ -145,16 +145,19 @@ def perplexity(model, tokenizer, texts: Sequence[str], max_length: Optional[int]
     limit = min(max_length or 10**9, lm.usable_context())
     total_nll, total_tokens, total_chars = 0.0, 0, 0
     per_text = []
+    # Encoder-decoder models score the second half of each text given the first half.
+    split = lm.kind == "seq2seq"
     for text in texts:
         ids = tok.encode(text, add_special=True)[:limit]
         if len(ids) < 2:
             continue
-        nll, n = lm.token_nll(torch.tensor([ids], device=device), start=1)
+        start = max(1, len(ids) // 2) if split else 1
+        nll, n = lm.token_nll(torch.tensor([ids], device=device), start=start)
         if n == 0:
             continue
         total_nll += nll
         total_tokens += n
-        total_chars += len(tok.decode(ids[1:], skip_special=True))
+        total_chars += len(tok.decode(ids[start:], skip_special=True))
         per_text.append(math.exp(nll / n))
     if total_tokens == 0:
         nan = float("nan")

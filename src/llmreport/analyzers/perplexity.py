@@ -24,6 +24,9 @@ class PerplexityAnalyzer(Analyzer):
     description = "How surprised the model is by ordinary English text (lower is better)."
 
     def run(self, model, tokenizer, config: RunConfig):
+        from ..adapters import as_model
+
+        kind = as_model(model, tokenizer).kind
         texts = perplexity_texts(config)
         res = perplexity(model, tokenizer, texts)
         ppl = res["perplexity"]
@@ -51,11 +54,20 @@ class PerplexityAnalyzer(Analyzer):
         ]
         hardest = max(per_text, key=lambda r: r["perplexity"]) if per_text else None
 
-        summary = f"Perplexity {ppl:,.2f} over {res['tokens']:,} tokens: {verdict}."
+        label = {"masked": "Pseudo-perplexity", "seq2seq": "Perplexity of the second half given the first"}.get(
+            kind, "Perplexity")
+        summary = f"{label} {ppl:,.2f} over {res['tokens']:,} tokens: {verdict}."
         notes = [
             "Perplexity depends on the tokenizer, so only compare it between models that share one.",
             "Bits per character does not depend on the tokenizer and is fairer across models.",
         ]
+        if kind == "masked":
+            notes.insert(0, "Masked language model: each token is hidden in turn and predicted from both sides "
+                            "(pseudo-perplexity, Salazar et al. 2020). It is lower than a left-to-right model's "
+                            "perplexity by nature, so don't compare the two.")
+        elif kind == "seq2seq":
+            notes.insert(0, "Encoder-decoder model: the first half of each text goes into the encoder and the "
+                            "second half is scored as the decoder's output.")
         if hardest and len(per_text) > 1:
             notes.append(f"Hardest text: {hardest['domain']} (perplexity {hardest['perplexity']:,.2f}).")
 
