@@ -112,10 +112,12 @@ class RobustnessAnalyzer(Analyzer):
         answers_usable = degenerate < max(1, n / 2) and (bool(clean_right) if labeled else baseline <= 0.6)
         context_usable = not math.isnan(context_benefit) and context_benefit >= 0.05
 
-        pred_part = (
-            f"typos in the context cancel {benefit_lost:.0%} of the benefit the model gets from it"
-            if context_usable else "the model barely uses earlier context, so typos in it have little effect"
-        )
+        if not context_usable:
+            pred_part = "the model barely uses earlier context, so typos in it have little effect"
+        elif benefit_lost <= 0:
+            pred_part = "typos in the context don't reduce the benefit the model gets from it"
+        else:
+            pred_part = f"typos in the context cancel {benefit_lost:.0%} of the benefit the model gets from it"
         if labeled and answers_usable:
             ans_part = (f"it still answers {retained:.0%} of the {len(clean_right)} questions it gets right "
                         "when they are misspelled")

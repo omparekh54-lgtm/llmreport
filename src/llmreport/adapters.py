@@ -417,6 +417,37 @@ def _find_loss(out):
     return None
 
 
+class _float_linears:
+    """Context manager: temporarily replace dynamically quantized Linear layers with float copies."""
+
+    def __init__(self, module):
+        self.module = module
+        self.swapped = []
+
+    def __enter__(self):
+        if self.module is None:
+            return self
+        for parent in list(self.module.modules()):
+            for name, child in list(parent.named_children()):
+                if hasattr(child, "_packed_params") and callable(getattr(child, "weight", None)):
+                    w = child.weight().dequantize()
+                    bias = child.bias() if callable(getattr(child, "bias", None)) else None
+                    lin = nn.Linear(w.shape[1], w.shape[0], bias=bias is not None)
+                    with torch.no_grad():
+                        lin.weight.copy_(w)
+                        if bias is not None:
+                            lin.bias.copy_(bias)
+                    setattr(parent, name, lin)
+                    self.swapped.append((parent, name, child))
+        return self
+
+    def __exit__(self, *exc):
+        for parent, name, child in self.swapped:
+            setattr(parent, name, child)
+        self.swapped.clear()
+        return False
+
+
 class LanguageModel:
     """Uniform access to any PyTorch language model.
 
@@ -638,7 +669,12 @@ class LanguageModel:
             a = torch.arange(1, 7, device=self.device).remainder(high - 1).add(1).view(1, -1)
             b = a.clone()
             b[0, -1] = 1 if int(a[0, -1]) != 1 else 2
-            return bool(torch.allclose(self.logits(a)[0, 0].float(), self.logits(b)[0, 0].float(), atol=1e-5))
+            # Dynamically quantized layers pick their activation scale from the whole input, which adds
+            # noise to every position; run this test with temporary float copies of those layers.
+            with _float_linears(self.module if self.is_module else None):
+                la, lb = self.logits(a)[0].float(), self.logits(b)[0].float()
+            first = float((la[0] - lb[0]).norm())
+            return first <= 1e-4 * (float(la[0].norm()) + 1e-12)
         except Exception:
             return None
 

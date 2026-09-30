@@ -431,6 +431,24 @@ def test_causal_vs_bidirectional_is_measured(tok, hf_tok):
     assert LanguageModel(bert, hf_tok).is_causal() is False
 
 
+def test_causal_check_on_quantized_models(hf_tok):
+    """INT8 layers add noise to every position; a quantized GPT must still count as left-to-right."""
+    import transformers as T
+
+    from llmreport.adapters import LanguageModel
+
+    torch.manual_seed(0)
+    gpt = GPT(GPTConfig(vocab_size=400, block_size=64, n_layer=2, n_head=16, n_embd=1024, dropout=0.0)).eval()
+    q = torch.ao.quantization.quantize_dynamic(gpt, {nn.Linear}, dtype=torch.qint8)
+    assert LanguageModel(q).is_causal() is True
+    assert hasattr(q.blocks[0].mlp.fc_in, "_packed_params")  # the original quantized layers are restored
+    bert = T.BertModel(T.BertConfig(vocab_size=len(hf_tok), hidden_size=64, num_hidden_layers=4,
+                                    num_attention_heads=4, intermediate_size=128)).eval()
+    qb = torch.ao.quantization.quantize_dynamic(bert, {nn.Linear}, dtype=torch.qint8)
+    assert LanguageModel(bert, hf_tok).is_causal() is False
+    assert LanguageModel(qb, hf_tok).is_causal() is False
+
+
 def test_roberta_context_accounts_for_position_offset(hf_tok):
     import transformers as T
 
