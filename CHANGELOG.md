@@ -9,6 +9,10 @@ This project follows [Semantic Versioning](https://semver.org/).
 - `health()`, `info()` and `llmreport health` crashed on dynamically quantized INT8 models (such as an exported
   `model_int8.pt`). Quantized weights are now checked like any others.
 
+### Added
+- `python -m llmreport ...` runs the command-line tool, for when the `llmreport` command is not on PATH
+  (common with `pip install --user` on Windows).
+
 ## [0.3.0] - 2026-09-30
 
 ### Added

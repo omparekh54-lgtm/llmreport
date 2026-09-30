@@ -290,6 +290,8 @@ llmreport dashboard runs/pretrain        # rebuild the dashboard page
 llmreport progress checkpoints/pretrain --model-class gpt_model:GPT --tokenizer tokenizer.json
 ```
 
+If Windows says `llmreport` is not recognized, use `python -m llmreport` instead (same options).
+
 `--model-class` takes `module:Class` (run it from the folder that contains the module) or `path/to/file.py:Class`.
 
 ## Write your own check
