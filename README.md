@@ -1,17 +1,35 @@
 # llmreport
 
-**A one-line behavior and performance report for any language model.**
+**Reports, quick functions and live training tracking for any language model.**
 
-You trained or fine-tuned an LLM. Now what is it actually like? `llmreport` runs a set of quick checks and gives you one readable report, right in your notebook:
+You are building or fine-tuning an LLM. `llmreport` tells you what it is, how it behaves, and how training is going:
 
 ```python
-import llmreport
+import llmreport as lr
 
-report = llmreport.analyze(model, tokenizer)   # or: llmreport.analyze("gpt2")
-report                                          # renders as a report in Jupyter / Colab
+lr.analyze(model, tokenizer)            # a full report in one line
+lr.info(model, tokenizer)               # everything about the model right now (structure, size, memory, health)
+lr.params(model)                        # 142627840
+lr.perplexity(model, tokenizer, texts)  # 21.4
+lr.health(model).ok                     # NaNs, dead layers, exploding weights?
+
+tracker = lr.Tracker(model, tokenizer, log_dir="runs/pretrain", eval_texts=val_texts)
+tracker.step(loss, optimizer=optimizer)   # inside your training loop: live charts and alerts
 ```
 
-It works with **any PyTorch language model**: Hugging Face models, and models you wrote yourself (nanoGPT-style GPTs, Llama-style models with RoPE and grouped-query attention, recurrent LSTMs, state-space models, TorchScript files, INT8-quantized checkpoints). The only requirement is that calling the model on token ids returns next-token scores.
+It works with **every common kind of PyTorch language model**:
+
+| Kind | Examples | What works |
+|---|---|---|
+| Causal (left-to-right) | GPT-2, Llama, Mistral, Qwen, Gemma, Phi, your own nanoGPT-style model | everything |
+| Mixture of experts | Mixtral | everything |
+| State-space / recurrent | Mamba, LSTMs | everything |
+| Encoder-decoder | T5, BART | everything (perplexity is the second half of a text given the first) |
+| Masked (BERT-style) | BERT, RoBERTa | structure, speed, health, pseudo-perplexity; generation checks are skipped |
+| Base models without an LM head | `GPT2Model`, `BertModel` | structure, speed, health |
+| Quantized / exported | INT8 dynamic quantization, TorchScript | everything |
+
+Models from other frameworks (JAX, ONNX, llama.cpp/GGUF, an inference server) work too if you wrap them in a function that turns a PyTorch tensor of token ids into a tensor of scores, and pass the function as the model: `lr.analyze(my_fn, tokenizer)`. API-only models (ChatGPT, Claude) can't be inspected because their weights aren't available.
 
 | Check | What it tells you |
 |---|---|
@@ -25,6 +43,102 @@ It works with **any PyTorch language model**: Hugging Face models, and models yo
 | **Python code** | Writes small Python functions and runs them against unit tests (pass@1), plus how often the output is valid Python |
 
 Every check gives a status (OK / Check / Info), a plain-English summary, the numbers, notes on caveats, and the actual sample outputs so you can judge for yourself.
+
+## Quick functions
+
+Small functions that each do one job and return a plain value, like `np.sum` or `np.mean`. They accept any model and tokenizer llmreport supports.
+
+| Function | Returns |
+|---|---|
+| `lr.params(model, trainable_only=False)` | Number of parameters (shared weights counted once, INT8 weights included) |
+| `lr.param_breakdown(model)` | Parameters per part: embeddings, attention, mlp, norm, output head... |
+| `lr.architecture(model, tokenizer)` | Structure as a dict: family, layers, hidden size, heads, KV heads, attention type, FFN size and type, position encoding, norms, activation, context |
+| `lr.memory(model, tokenizer, context=None, batch_size=1)` | Bytes: weights now, FP32/FP16/INT8/INT4, KV cache, inference total, training with AdamW |
+| `lr.info(model, tokenizer, optimizer=None)` | Everything above plus live state: train/eval mode, frozen params, gradient and weight norms, optimizer and learning rate, optimizer memory, tokenizer, health |
+| `lr.health(model)` | Weight and gradient check: NaN/inf, all-zero layers, collapsed norms, dead neurons, extreme or outlier layers, parameters with no gradient. `.ok`, `.issues`, `.layers` |
+| `lr.grad_norm(model)`, `lr.weight_norm(model)` | Total L2 norms |
+| `lr.perplexity(model, tokenizer, texts=None, details=False)` | Perplexity on your texts (default: built-in English) |
+| `lr.generate(model, tokenizer, prompt, max_new_tokens=64, template=None)` | Greedy completion |
+| `lr.predict_next(model, tokenizer, text, k=5)` | The k most likely next tokens with probabilities |
+| `lr.speed(model, tokenizer, prompt_tokens=128, new_tokens=32)` | Time to first token and tokens/s |
+| `lr.code_score(model, tokenizer, template=None)` | Pass rate on small Python tasks with unit tests |
+| `lr.text_stats(text)` | Repetition and variety of a text |
+| `lr.check(name, model, tokenizer)` | One check from the report, e.g. `lr.check("repetition", ...)` |
+| `lr.compare(report_a, report_b)` | Metric-by-metric comparison of two reports |
+
+```python
+>>> lr.info(model, tokenizer, optimizer=opt)
+llmreport.info: GPT
+  Overview
+    Kind              causal (left-to-right) language model
+    Family            decoder-only transformer
+    Total params      143.15M
+    Mode              training
+  Structure
+    Layers             10
+    Attention type     multi-head (MHA)
+    Position encoding  learned absolute (512 positions)
+    Norm placement     pre-norm
+    ...
+  Training state
+    Grad norm              0.842
+    Learning rate          0.0003
+    Optimizer state bytes  1.1 GB
+  Health
+    Health  Healthy: no problems found in 63 weight tensors.
+```
+
+## Track training live
+
+Add a `Tracker` to any training loop (plain PyTorch, Lightning, or anything else):
+
+```python
+tracker = lr.Tracker(
+    model, tokenizer,
+    log_dir="runs/pretrain",
+    eval_texts=val_texts, eval_every=500,              # perplexity on your validation texts
+    sample_prompts=["def fibonacci(n):"],               # see what the model writes as it learns
+    prompt_template="<|instruction|>{prompt}<|response|>",
+    total_steps=60_000,                                 # progress and time remaining
+)
+for x, y in loader:
+    _, loss = model(x, y)
+    loss.backward()
+    tracker.step(loss, optimizer=optimizer, tokens=x.numel())   # after backward, before zero_grad
+    optimizer.step(); optimizer.zero_grad()
+tracker.close()
+```
+
+Each step records loss (and a smoothed average), learning rate, gradient norm, step time, tokens/s and GPU memory. Every `eval_every` steps it measures perplexity, generates the sample prompts and checks the weights' health. Log your own numbers with `tracker.log(val_loss=...)`.
+
+**Problems are reported the moment they happen**, with advice:
+
+- **Critical:** the loss or gradients are NaN or infinite, or the weights are broken.
+- **Warning:** a loss spike, a gradient explosion, vanishing gradients, evaluation getting worse while training loss falls (overfitting), dead layers or collapsed norms.
+- **Info:** a plateau (no improvement for a while), sample outputs stuck in loops, or training suddenly slower.
+
+**Watch it** in any of these ways:
+
+- **Browser:** open `runs/pretrain/dashboard.html`. It refreshes itself and shows charts, alerts, the latest samples, weight health and the model's details.
+- **Another terminal:** `llmreport watch runs/pretrain` prints progress, evaluations and alerts as they happen.
+- **Jupyter:** a live panel updates in place.
+
+Restarting training with the same `log_dir` continues the same run. With the Hugging Face `Trainer`, pass `callbacks=[tracker.hf_callback()]`. Read a run back with `lr.load_run("runs/pretrain")`.
+
+### Progress over saved checkpoints
+
+Already trained? Chart how the model improved across the checkpoints you saved:
+
+```python
+lr.track_checkpoints("checkpoints/pretrain", GPT, "tokenizer.json",
+                     texts=val_texts, sample_prompts=["def add(a, b):"], code=True)
+```
+
+```bash
+llmreport progress checkpoints/pretrain --model-class gpt_model:GPT --tokenizer tokenizer.json --code
+```
+
+This writes `checkpoints/pretrain/llmreport_progress/dashboard.html` with perplexity (and code pass rate) at each step.
 
 ## Install
 
@@ -168,6 +282,12 @@ llmreport my-org/my-model --checks architecture,performance --device cuda
 llmreport checkpoints/final.pt --model-class gpt_model:GPT --tokenizer tokenizer.json \
           --template "<|instruction|>{prompt}<|response|>" --html report.html
 llmreport --list-checks
+
+llmreport info  checkpoints/final.pt --model-class gpt_model:GPT --tokenizer tokenizer.json
+llmreport health checkpoints/final.pt --model-class gpt_model:GPT
+llmreport watch runs/pretrain            # follow a training run from another terminal
+llmreport dashboard runs/pretrain        # rebuild the dashboard page
+llmreport progress checkpoints/pretrain --model-class gpt_model:GPT --tokenizer tokenizer.json
 ```
 
 `--model-class` takes `module:Class` (run it from the folder that contains the module) or `path/to/file.py:Class`.
@@ -222,6 +342,9 @@ The test suite checks the numbers against cases where the right answer is known 
 - **Models written from scratch**: a nanoGPT-style GPT (the PyCoder model this library was first built for) reports exactly its published 142,627,840 parameters; Llama-style (RoPE, RMSNorm, grouped-query attention, SwiGLU), LSTM, sequence-first `nn.Transformer`, TorchScript and INT8-quantized models are each checked for the right structure and for perplexity equal to a hand calculation from their logits.
 - **Same weights, two implementations**: a from-scratch GPT and the same weights loaded into Hugging Face GPT-2 give the same perplexity, the same architecture numbers and token-for-token the same generated text.
 - **Hugging Face architectures** (Llama, Qwen2, GPT-NeoX, Gemma, Mixtral, Mamba) get the right attention type, feed-forward type and activation.
+- **Other kinds of model**: BERT's pseudo-perplexity and T5's perplexity match hand calculations; T5 greedy output matches Hugging Face `generate()` exactly; whether a model is left-to-right or bidirectional is measured, not guessed.
+- **Health checks** raise no issues on healthy GPT-2, OPT, BERT, Llama-style and from-scratch models, and catch injected NaNs, zeroed layers, collapsed norms, dead rows and infinite gradients.
+- **Tracker**: a real training loop runs with no false alarms; injected NaN losses, gradient explosions, vanishing gradients, loss spikes, plateaus and overfitting are all caught; step time excludes the tracker's own evaluation work; resuming continues the run; the Hugging Face `Trainer` callback records every step.
 - **Tokenizers**: Hugging Face, `tokenizers`, tokenizer.json, SentencePiece, tiktoken and a hand-written character tokenizer all give perplexity equal to the vocabulary size on a uniform model.
 - **Behavior checks** are run on scripted models whose answers we write ourselves (always correct, correct in only one phrasing, looping, refusing everything, never refusing, typo-tolerant, typo-brittle), and each must reach the expected verdict.
 
@@ -241,6 +364,7 @@ ruff check src tests
 - Long-context "needle in a haystack" check
 - Optional wrappers for `lm-evaluation-harness` and `garak`
 - Charts for speed vs prompt length
+- Weights & Biases / TensorBoard export from the Tracker
 - Support for API-based models
 - KV-cache-aware generation for custom models
 

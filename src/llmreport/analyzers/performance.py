@@ -32,6 +32,7 @@ class PerformanceAnalyzer(Analyzer):
     title = "Performance"
     description = "Time to first token, generation speed and memory at several prompt lengths."
     needs_generation = True
+    handles_any_model = True  # models that can't generate still get forward-pass timings
 
     @torch.no_grad()
     def run(self, model, tokenizer, config: RunConfig):
@@ -55,7 +56,13 @@ class PerformanceAnalyzer(Analyzer):
         process = psutil.Process()
         rss_before = process.memory_info().rss
 
+        generates = lm.can_generate
+        if not generates:
+            new_tokens = 0
+
         def run_generate(ids):
+            if not generates:
+                return []
             return lm.generate_ids(ids, new_tokens, min_new_tokens=new_tokens)  # fixed length: comparable speeds
 
         # Warm-up: the first call pays one-off costs (kernel compilation, allocation).
@@ -77,19 +84,17 @@ class PerformanceAnalyzer(Analyzer):
                 total.append(t["seconds"])
                 produced = max(1, len(out))
             ttft = statistics.median(prefill)
-            gen_time = statistics.median(total)
-            decode_time = max(gen_time - ttft, 1e-9)
-            rows.append(
-                {
-                    "prompt_tokens": length,
-                    "new_tokens": produced,
-                    "ttft_ms": round(ttft * 1000, 2),
-                    "total_ms": round(gen_time * 1000, 2),
-                    "decode_tokens_per_s": round(max(1, produced - 1) / decode_time, 2),
-                    "prefill_tokens_per_s": round(length / max(ttft, 1e-9), 1),
-                }
-            )
+            row = {"prompt_tokens": length, "ttft_ms": round(ttft * 1000, 2),
+                   "prefill_tokens_per_s": round(length / max(ttft, 1e-9), 1)}
+            if generates:
+                gen_time = statistics.median(total)
+                decode_time = max(gen_time - ttft, 1e-9)
+                row.update({"new_tokens": produced, "total_ms": round(gen_time * 1000, 2),
+                            "decode_tokens_per_s": round(max(1, produced - 1) / decode_time, 2)})
+            rows.append(row)
 
+        if not generates:
+            return self._forward_only(lm, rows, device, repeats, skipped)
         metrics = {
             "device": str(device),
             "ttft_ms": rows[0]["ttft_ms"],
@@ -130,3 +135,23 @@ class PerformanceAnalyzer(Analyzer):
             notes.append("Under 1 token/s: consider a GPU, half precision or quantization.")
 
         return self.result(summary, metrics=metrics, details={"by_prompt_length": rows}, status=status, notes=notes)
+
+    def _forward_only(self, lm, rows, device, repeats, skipped):
+        """Timings for models that don't generate text: how fast one forward pass reads a prompt."""
+        metrics = {
+            "device": str(device),
+            "forward_ms": rows[0]["ttft_ms"],
+            "prefill_tokens_per_s": rows[0]["prefill_tokens_per_s"],
+            "forward_ms_longest_prompt": rows[-1]["ttft_ms"],
+        }
+        if device.type == "cuda":
+            metrics["peak_gpu_memory_bytes"] = torch.cuda.max_memory_allocated(device)
+        summary = (f"Reads about {rows[0]['prefill_tokens_per_s']:,.0f} tokens/s on {device}: "
+                   f"{rows[0]['ttft_ms']:,.0f} ms for a {rows[0]['prompt_tokens']}-token input"
+                   + (f" ({rows[-1]['ttft_ms']:,.0f} ms at {rows[-1]['prompt_tokens']} tokens)." if len(rows) > 1
+                      else "."))
+        notes = [f"{lm.name} is a {lm.kind_label}, so only the forward pass is timed (no text generation).",
+                 f"Median of {repeats} runs after one warm-up, batch size 1."]
+        if skipped:
+            notes.append(f"Skipped input lengths longer than the context window: {skipped}.")
+        return self.result(summary, metrics=metrics, details={"by_prompt_length": rows}, status=OK, notes=notes)

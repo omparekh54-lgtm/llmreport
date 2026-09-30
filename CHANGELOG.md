@@ -3,6 +3,30 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-30
+
+### Added
+- Quick functions in the style of `np.sum`: `params`, `param_breakdown`, `architecture`, `memory`, `info`,
+  `health`, `grad_norm`, `weight_norm`, `perplexity`, `generate`, `predict_next`, `speed`, `code_score`,
+  `text_stats`, `check` and `compare`.
+- `llmreport.info()`: everything about a model at this moment, including while it trains (mode, frozen
+  parameters, gradient and weight norms, optimizer, learning rate and optimizer memory).
+- `llmreport.health()`: finds NaN/inf weights and gradients, all-zero layers, collapsed norms, dead neurons,
+  extreme and outlier layers, float16 overflow risk, and parameters that get no gradient.
+- `llmreport.Tracker` for live training: loss, smoothed loss, learning rate, gradient norm, speed and GPU memory
+  every step; periodic perplexity, sample generations and health checks; alerts for NaN, spikes, exploding or
+  vanishing gradients, plateaus, overfitting and slowdowns; `metrics.jsonl`/`events.jsonl` logs; a
+  self-refreshing HTML dashboard; a live Jupyter panel; resuming; a Hugging Face `Trainer` callback.
+- `llmreport.track_checkpoints()` charts progress across saved checkpoints; `llmreport.load_run()` reads runs.
+- CLI commands: `watch`, `dashboard`, `info`, `health` and `progress`.
+- More kinds of model: encoder-decoder (T5, BART), masked (BERT, RoBERTa, with pseudo-perplexity) and base
+  models without a language-model head. Checks that don't apply are marked "skipped" with the reason.
+- Whether a model is left-to-right or bidirectional is measured directly; encoder and decoder layers are counted
+  separately.
+
+### Fixed
+- RoBERTa-style models: the context window accounts for the two reserved position slots.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added

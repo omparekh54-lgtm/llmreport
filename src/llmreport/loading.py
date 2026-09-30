@@ -29,10 +29,30 @@ def pick_device(device: Optional[str]) -> str:
 
 def load(name_or_path: str, device: Optional[str] = "auto", **model_kwargs):
     """Load a Hugging Face causal LM and its tokenizer by name or local path."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import (
+        AutoConfig,
+        AutoModel,
+        AutoModelForCausalLM,
+        AutoModelForMaskedLM,
+        AutoModelForSeq2SeqLM,
+        AutoTokenizer,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(name_or_path)
-    model = AutoModelForCausalLM.from_pretrained(name_or_path, **model_kwargs)
+    config = AutoConfig.from_pretrained(name_or_path)
+    if getattr(config, "is_encoder_decoder", False):
+        order = (AutoModelForSeq2SeqLM, AutoModelForCausalLM, AutoModel)
+    else:
+        order = (AutoModelForCausalLM, AutoModelForMaskedLM, AutoModel)
+    errors = []
+    for auto in order:  # causal LMs first, then masked or encoder-decoder models, then a bare model
+        try:
+            model = auto.from_pretrained(name_or_path, **model_kwargs)
+            break
+        except (ValueError, KeyError, OSError) as exc:
+            errors.append(f"{auto.__name__}: {exc}")
+    else:
+        raise ValueError(f"Couldn't load {name_or_path}: " + " | ".join(errors))
     model.to(pick_device(device))
     return model, tokenizer
 

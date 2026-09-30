@@ -73,6 +73,24 @@ def _config_values(lm):
     return found
 
 
+def _encoder_decoder_stacks(module):
+    """(encoder layers, decoder layers) for an encoder-decoder model, from its block containers."""
+    from torch import nn
+
+    enc = dec = 0
+    for name, m in module.named_modules():
+        if not isinstance(m, nn.ModuleList) or len({type(c) for c in m}) != 1 or not len(m):
+            continue
+        if not list(m[0].children()):
+            continue
+        low = name.lower()
+        if "encoder" in low and "decoder" not in low:
+            enc = max(enc, len(m))
+        elif "decoder" in low:
+            dec = max(dec, len(m))
+    return (enc, dec) if enc and dec else None
+
+
 class ArchitectureAnalyzer(Analyzer):
     name = "architecture"
     title = "Architecture"
@@ -134,6 +152,20 @@ class ArchitectureAnalyzer(Analyzer):
             shape["mlp_type"] = f"mixture of experts ({shape['experts']} experts)"
         if shape.get("experts") and "experts" not in str(shape.get("family", "")):
             shape["family"] = f"{shape.get('family', 'model')} with mixture of experts ({shape['experts']} experts per layer)"
+        # Family: say whether it is left-to-right, bidirectional or encoder-decoder, measured on the model.
+        family = str(shape.get("family", ""))
+        if lm.kind == "seq2seq":
+            shape["family"] = family.replace("decoder-only transformer", "encoder-decoder transformer")
+        elif "transformer" in family or "repeated blocks" in family:
+            causal = lm.is_causal() if lm.device.type != "meta" else (lm.kind == "causal")
+            if causal is False:
+                shape["family"] = family.replace("decoder-only transformer", "encoder-only (bidirectional) transformer") \
+                    .replace("stack of repeated blocks", "encoder-only (bidirectional) stack")
+        shape["model_kind"] = lm.kind_label
+        stacks = _encoder_decoder_stacks(module) if lm.kind == "seq2seq" else None
+        if stacks:
+            shape["encoder_layers"], shape["decoder_layers"] = stacks
+            shape["layers"] = sum(stacks)
         _, blocks = repeated_blocks(module)
         placement = norm_placement(lm, blocks) if blocks and shape.get("norm_type") else None
         if placement:
@@ -159,8 +191,8 @@ class ArchitectureAnalyzer(Analyzer):
         layers = shape.get("layers")
         kv_heads = shape.get("kv_heads")
         head_dim = shape.get("head_dim")
-        if all(isinstance(v, int) and v for v in (layers, kv_heads, head_dim)) and \
-                "transformer" in str(shape.get("family", "")):
+        if all(isinstance(v, int) and v for v in (layers, kv_heads, head_dim)) and lm.kind == "causal" and \
+                "decoder-only" in str(shape.get("family", "")):
             param_dtype = lm.dtype or torch.float32
             elem = torch.tensor([], dtype=param_dtype).element_size() if param_dtype.is_floating_point else 4
             kv_per_token = 2 * layers * kv_heads * head_dim * elem
@@ -197,6 +229,8 @@ class ArchitectureAnalyzer(Analyzer):
             "trainable_pct": round(100 * trainable / total, 2) if total else 0.0,
             "params_without_position_embeddings": total - pos_params if pos_params else None,
             "layers": layers if isinstance(layers, int) else None,
+            "encoder_layers": shape.get("encoder_layers"),
+            "decoder_layers": shape.get("decoder_layers"),
             "hidden_size": hidden if isinstance(hidden, int) else None,
             "attention_heads": heads if isinstance(heads, int) else None,
             "kv_heads": kv_heads if isinstance(kv_heads, int) else None,
@@ -226,7 +260,10 @@ class ArchitectureAnalyzer(Analyzer):
         arch = (getattr(cfg, "architectures", None) if lm.is_hf else None) or [type(module).__name__]
         family = shape.get("family", "model")
         parts = [f"{arch[0]} ({family}) with {human_number(total)} parameters"]
-        if isinstance(layers, int):
+        if stacks:
+            size = f"{stacks[0]} encoder + {stacks[1]} decoder layers" + (f" x {hidden} hidden" if isinstance(hidden, int) else "")
+            parts.append(size)
+        elif isinstance(layers, int):
             size = f"{layers} layers" + (f" x {hidden} hidden" if isinstance(hidden, int) else "")
             parts.append(size)
         if isinstance(heads, int):

@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 import torch
 from torch import nn
 
-__all__ = ["LanguageModel", "TokenizerAdapter", "as_model", "as_tokenizer"]
+__all__ = ["LanguageModel", "TokenizerAdapter", "NotSupportedByModel", "as_model", "as_tokenizer"]
 
 
 # ============================================================== tokenizers
@@ -362,8 +362,21 @@ _CONTEXT_ATTRS = (
     "max_sequence_length", "context_length", "context_len", "context_size", "seq_len", "seq_length",
     "n_ctx", "max_len", "max_length_positions",
 )
+_OFFSET_POSITION_MODELS = ("roberta", "camembert", "longformer", "data2vec-text", "ibert", "luke", "markuplm",
+                           "mpnet", "esm")
 _CONFIG_ATTRS = ("config", "cfg", "params", "args", "hparams", "model_args", "conf")
 _TARGET_PARAMS = ("targets", "target", "labels", "y")
+
+KIND_LABELS = {
+    "causal": "causal (left-to-right) language model",
+    "seq2seq": "encoder-decoder (sequence-to-sequence) model",
+    "masked": "masked language model (BERT-style)",
+    "encoder": "base model without a language-model head",
+}
+
+
+class NotSupportedByModel(Exception):
+    """The model can't do what a check needs (for example, a BERT-style model can't generate text)."""
 
 
 def _is_hf_model(module) -> bool:
@@ -443,6 +456,7 @@ class LanguageModel:
         self._layout: Optional[str] = None  # "bt", "tb", "flat" or "last"
         self._context: Optional[Tuple[Optional[int], str]] = None
         self.vocab_out: Optional[int] = None  # size of the model's output layer, known after probe()
+        self._kind: Optional[str] = None
 
     # ---- forwarding for backwards compatibility
     def __getattr__(self, name):
@@ -532,6 +546,11 @@ class LanguageModel:
             for attr in _CONTEXT_ATTRS:
                 value = _config_value(cfg, attr)
                 if value:
+                    # RoBERTa-style models start positions after the padding index, so two slots are unusable.
+                    if attr == "max_position_embeddings" and self.is_hf and \
+                            any(k in str(getattr(cfg, "model_type", "")) for k in _OFFSET_POSITION_MODELS):
+                        pad = getattr(cfg, "pad_token_id", 1)
+                        value -= (pad if isinstance(pad, int) else 1) + 1
                     return value, f"model config ({attr})"
         for attr in _CONTEXT_ATTRS:
             value = _config_value(self.module, attr)
@@ -560,6 +579,8 @@ class LanguageModel:
 
     @property
     def uses_model_generate(self) -> bool:
+        if self.kind == "seq2seq":
+            return True
         if self.generation == "builtin" or self._forward_override is not None:
             return False
         if self.generation == "model":
@@ -571,6 +592,77 @@ class LanguageModel:
             return True
         names, _ = _signature_params(gen)
         return "input_ids" in names  # Hugging Face-style signature, so greedy arguments are understood
+
+    # ---- what kind of model is this?
+    @property
+    def kind(self) -> str:
+        """'causal', 'seq2seq', 'masked' or 'encoder' (no language-model head)."""
+        if self._kind is None:
+            self._kind = self._detect_kind()
+        return self._kind
+
+    def _detect_kind(self) -> str:
+        if self._forward_override is not None or not self.is_module:
+            return "causal"
+        m = self.module
+        cfg = getattr(m, "config", None)
+        if getattr(cfg, "is_encoder_decoder", False):
+            return "seq2seq"
+        if self.is_hf:
+            cls = type(m).__name__
+            if "MaskedLM" in cls or (cls.endswith("ForPreTraining") and not getattr(cfg, "is_decoder", False)):
+                return "masked"
+            get_out = getattr(m, "get_output_embeddings", None)
+            try:
+                if callable(get_out) and get_out() is None:
+                    return "encoder"
+            except Exception:
+                pass
+        return "causal"
+
+    @torch.no_grad()
+    def is_causal(self) -> Optional[bool]:
+        """True if each position only sees earlier tokens (left-to-right), False if it sees the whole input.
+
+        Found by changing the last token and checking whether the first position's output changes.
+        None when it can't be measured.
+        """
+        if self.kind == "seq2seq":
+            return None
+        try:
+            self.probe()
+            if self._layout == "last":
+                return True  # only the last position is exposed; used left-to-right
+            vocab = self.tok.vocab_size if self.tok is not None else None
+            high = max(3, min(vocab or 50, 50))
+            a = torch.arange(1, 7, device=self.device).remainder(high - 1).add(1).view(1, -1)
+            b = a.clone()
+            b[0, -1] = 1 if int(a[0, -1]) != 1 else 2
+            return bool(torch.allclose(self.logits(a)[0, 0].float(), self.logits(b)[0, 0].float(), atol=1e-5))
+        except Exception:
+            return None
+
+    @property
+    def kind_label(self) -> str:
+        return KIND_LABELS.get(self.kind, self.kind)
+
+    @property
+    def can_generate(self) -> bool:
+        return self.kind in ("causal", "seq2seq")
+
+    @property
+    def can_score(self) -> bool:
+        return self.kind in ("causal", "seq2seq", "masked")
+
+    def _decoder_start_id(self) -> int:
+        cfg = getattr(self.module, "config", None)
+        gen = getattr(self.module, "generation_config", None)
+        for source in (gen, cfg):
+            value = getattr(source, "decoder_start_token_id", None)
+            if isinstance(value, int):
+                return value
+        pad = getattr(cfg, "pad_token_id", None)
+        return pad if isinstance(pad, int) else 0
 
     @property
     def accepts_labels(self) -> bool:
@@ -593,11 +685,16 @@ class LanguageModel:
             return m(ids)
         if mode == "pos_targets":
             return m(ids, ids)
+        if mode == "seq2seq":
+            start = torch.full((ids.shape[0], 1), self._decoder_start_id(), dtype=torch.long, device=ids.device)
+            return m(input_ids=ids, decoder_input_ids=start, use_cache=False)
         raise ValueError(mode)
 
     def _candidate_calls(self) -> List[str]:
         if self._forward_override is not None:
             return ["override"]
+        if self.kind == "seq2seq":
+            return ["seq2seq"]
         fn = self.module.forward if self.is_module and hasattr(self.module, "forward") else self.module
         names, has_kwargs = _signature_params(fn)
         calls = ["kw"] if "input_ids" in names else []
@@ -645,6 +742,7 @@ class LanguageModel:
         """Work out how to call the model, once. Raises TypeError if it can't be used as a language model."""
         if self._call is not None:
             return
+        self.kind  # noqa: B018 - decide the kind before probing
         vocab = self.tok.vocab_size if self.tok is not None else None
         length = 8
         if self.context_length:
@@ -679,6 +777,14 @@ class LanguageModel:
                 except Exception:
                     pass
         self.vocab_out = int(logits.shape[-1])
+        if self._kind == "causal" and not self.is_hf and self.is_module and self._forward_override is None:
+            embeddings = [m for m in self.module.modules() if isinstance(m, nn.Embedding)]
+            if embeddings:
+                token = max(embeddings, key=lambda e: e.num_embeddings)
+                # Output as wide as the hidden size (not the vocabulary): hidden states, no LM head.
+                if self.vocab_out == token.embedding_dim != token.num_embeddings and \
+                        (vocab is None or self.vocab_out < vocab):
+                    self._kind = "encoder"
 
     @property
     def full_logits(self) -> bool:
@@ -707,6 +813,13 @@ class LanguageModel:
         if seq <= start:
             return 0.0, 0
         n = seq - start
+        self.probe()
+        if self.kind == "seq2seq":
+            return self._seq2seq_nll(ids, start)
+        if self.kind == "masked":
+            return self._pseudo_nll(ids, start)
+        if self.kind == "encoder":
+            raise NotSupportedByModel(f"{self.name} has no language-model head, so it can't score text.")
         if self.accepts_labels:
             labels = ids.clone()
             labels[:, :start] = -100
@@ -725,10 +838,40 @@ class LanguageModel:
             total -= float(logp[ids[0, t]])
         return total, n
 
+    def _seq2seq_nll(self, ids: torch.Tensor, start: int) -> Tuple[float, int]:
+        """Score ``ids[start:]`` as the decoder's output, with ``ids[:start]`` as the encoder input."""
+        src, tgt = ids[:, :start], ids[:, start:]
+        out = self.module(input_ids=src, labels=tgt, use_cache=False)
+        n = tgt.shape[1]
+        return float(out.loss) * n, n
+
+    def _pseudo_nll(self, ids: torch.Tensor, start: int, chunk: int = 16) -> Tuple[float, int]:
+        """Pseudo-log-likelihood (Salazar et al., 2020): mask each token in turn and score it.
+
+        Special tokens such as [CLS] and [SEP] are not scored.
+        """
+        mask_id = getattr(getattr(self.tok, "raw", None), "mask_token_id", None) if self.tok is not None else None
+        if mask_id is None:
+            raise NotSupportedByModel("This masked language model's tokenizer has no mask token.")
+        special = set(self.tok.special_tokens.values()) if self.tok is not None else set()
+        positions = [t for t in range(start, ids.shape[1]) if int(ids[0, t]) not in special]
+        total = 0.0
+        for i in range(0, len(positions), chunk):
+            part = positions[i:i + chunk]
+            batch = ids.repeat(len(part), 1)
+            for row, t in enumerate(part):
+                batch[row, t] = mask_id
+            logits = self.logits(batch).float()
+            for row, t in enumerate(part):
+                total -= float(torch.log_softmax(logits[row, t], dim=-1)[ids[0, t]])
+        return total, len(positions)
+
     # ---- generation
     @torch.no_grad()
     def generate_ids(self, prompt_ids: Sequence[int], max_new_tokens: int, min_new_tokens: int = 0) -> List[int]:
         """Greedy-decode up to ``max_new_tokens`` tokens and return only the new ids."""
+        if not self.can_generate:
+            raise NotSupportedByModel(f"{self.name} is a {self.kind_label}; it doesn't generate text.")
         if not prompt_ids:
             start = self.tok.bos_id if self.tok is not None else None
             prompt_ids = [start if start is not None else (self.tok.eos_id if self.tok else 0) or 0]
@@ -742,6 +885,9 @@ class LanguageModel:
             if min_new_tokens:
                 kwargs["min_new_tokens"] = min_new_tokens
             out = self.module.generate(input_ids=ids, attention_mask=torch.ones_like(ids), **kwargs)
+            if self.kind == "seq2seq":  # the decoder output doesn't repeat the prompt; drop the start token
+                new = out[0].tolist()
+                return new[1:] if new and new[0] == self._decoder_start_id() else new
             return out[0, ids.shape[1]:].tolist()
 
         self.probe()
